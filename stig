@@ -1,0 +1,253 @@
+ip access-list failopen_acl
+ permit ip any any
+!
+aaa new-model
+!
+aaa server radius dynamic-author
+ client <radius-server> server-key <key>
+ client <radius-server2> server-key <key>
+auth-type any
+!
+radius server radius-server
+ address ipv4 <radius-ip> auth-port 1812 acct-port 1813
+ automate-tester username <username> ignore-acct-port probe-on
+ key <key>
+ timeout 3
+ retransmit 2
+!
+radius server radius-server2
+ address ipv4 <radius-ip> auth-port 1812 acct-port 1813
+ automate-tester username <username> ignore-acct-port probe-on
+ key <key> 
+ timeout 3 
+ retransmit 2
+!
+aaa group server radius radius_group
+ server name radius-server 
+ server name radius-server2
+ ip radius source-interface loopback 0
+ load-balance method least-outstanding
+ deadtime 15
+!
+tacacs server tacacs-server address ipv4 <tac-ip> 
+ key <key> single-connection
+!
+tacacs server tacacs-server2
+ address ipv4 <tac-ip> 
+ key <key> single-connection
+!
+aaa group server tacacs+ tacacs_group
+ server name tacacs-server 
+ server name tacacs-server2
+ ip tacacs source-interface loopback 0
+!
+aaa authentication login method_aaa group tacacs_group local
+aaa authentication dot1x default group radius_group
+aaa authorization config-commands
+aaa authorization commands 1 method_aaa group tacacs_group local if-authenticated
+aaa authorization commands 15 method_aaa group tacacs_group local if-authenticated
+aaa authorization exec method_aaa group tacacs_group local
+aaa authorization network default group radius_group
+aaa accounting dot1x default start-stop group radius_group
+aaa accounting network default start-stop group radius_group
+aaa accounting identity default start-stop group radius_group
+aaa accounting commands 1 default start-stop group radius_group
+aaa accounting update newinfo periodic 2880
+!
+line vty 0
+ transport input none
+line vty 1 4
+ access-class vty_acl in vrf-also
+ login authentication method_aaa
+ authorization exec method_aaa
+ authorization commands 1 method_aaa
+ authorization commands 15 method_aaa
+!
+radius-server attributes 6 on-for-login-auth
+radius-server attributes 6 support-multiple
+radius-server attributes 8 include-in-access-req
+radius-server attributes 25 access-request include
+radius-server attributes 31 mac format ietf upper-case
+radius-server attributes 31 send nas-port-detail mac-only
+radius-server dead-criteria time 10 tries 3
+radius-server retry method reorder
+radius-server retransmit 1
+radius-server deadtime 5
+radius-server load-balance method least-outstanding
+!
+!
+dot1x system-auth-control
+dot1x logging verbose
+dot1x critical eapol
+!
+username <username> privilege 0 algorithm-type sha256 secret <secret>
+username <username> autocommand exit
+!
+device-sensor filter-list dhcp list dhcp_sensor
+ option name host-name
+ option name requested-address
+ option name parameter-request-list
+ option name class-identifier
+ option name client-identifier
+device-sensor filter-spec dhcp include list dhcp_sensor
+device-sensor accounting
+device-sensor notify all-changes
+!
+device-tracking policy ipdt_policy
+ no protocol udp
+ tracking enable
+ limit address-count 10
+!
+device classifier
+!
+clock timezone CST -6!
+event manager applet backup_config
+ event syslog pattern "%SYS-5-CONFIG"
+ action 1 cli command "enable" 
+ action 2 info type routername
+ action 3 cli command "copy run tftp:" pattern "remote host" 
+ action 4 cli command "192.168.1.10" pattern "filename" 
+ action 5 cli command "$_info_routername-cfg_$_event+pub_sec" 
+ action 6 syslog priority informational msg "Config backup was executed"
+!
+login block-for 900 attenpts 3 within 120
+login quiet-mode access-class vty_acl
+login on-failure loglogin on-success log
+!
+logging discriminator no_dot1x facility drops AUTHMGR|MAB|DOT1X|EPM
+!
+errdisable recovery cause all
+errdisable recovery interval 30
+!
+ntp logging
+ntp authentication-key 9 md5 <key>
+ntp authenticate
+ntp trusted-key 9
+ntp source interface loopback0
+ntp server <ip-addr>
+!
+ip access-list extended fail_open_acl
+ permit ip any any
+!
+service-template critical_data_access
+access-group fail_open_acl
+ vlan <id>
+!
+service-template critical_voice_acess
+ access-group fail_open_acl vlan <id>
+!
+service-template default_linksec_policy_should_secure
+ linksec policy should-secure
+!
+class-map type control subscriber match-all aaa_svr_down_authd_host
+ match result-type aaa-timeout
+ match authorization-status authorized
+!
+class-map type control subscriber match-allaaa_svr_down_unauthd_host
+ match result-type aaa-timeout
+ match authorization-status unauthorizad
+!
+class-map type control subscriber match-all dot1x_failed
+ match method dot1x
+ match result-type method dot1x authoritative
+!
+class-map type control subscriber match-all dot1x_no_resp
+ match method dot1x
+ match result-type method agent-not-found
+!
+class-map type control subscriber match-all dot1x_timeout
+ match method dot1x
+ match result-type method dot1x method-timeout
+ match result-type method-timeout
+!
+class-map type control subscriber match-all mab_failed
+ match method mab 
+ match result-type method mab authoritative
+!
+class-map type control subscriber match-any in_critical_auth
+ match activated-service-template critical_data_access
+ match activated-service-template critical_voice_access
+!
+class-map type control subscriber match-none not_in_critical_auth
+ match activated-service-template critical_data_acesss
+ match activated-service-template critical_voice_acesss
+!
+class-map type control subscriber match-all authc_success_authz_fail
+ match authorization-status unauthorized
+ match result-type success
+!
+policy-map control subscriber dot1x_ibns2
+ event session-started match-all
+  10 class always do-until-failure
+   10 authenticate using dot1x retries 2 retry-time 0 priority 10
+ event authentication-failure match-first
+  5 class dot1x_failed do-until-failure
+   10 terminate dot1x
+   20 authenticate using mab priority 20
+  10 class aaa_svr_down_unauthd_host do-until-failure
+   10 clear-authenticated-data-host-on-port
+   20 activate service-template 
+  20 class aaa_svr_down_authd_host do-until-failure
+   10 pause reauthentication
+   20 authorize
+  30 class dot1x_no_resp do-until-failure
+   10 terminate dot1x
+   20 authenticate using mab priority 20 
+  40 class dot1x_timeout do-until-failure
+   10 terminate dot1x
+   20 authenticate using mab priority 20
+  50 class mab_failed do-until-failure
+   10 terminate mab
+   20 authenticate using dot1x priority 10
+  90 class always do-until-failure
+   10 terminate mab
+   20 terminate dot1x
+   30 terminate webauth
+   40 authentication-restart 60
+ event agent-found match-all
+  10 class always do-until-failure
+   10 terminate mab
+   20 terminate webauth
+   30 authenticate using dot1x priority 10
+ event aaa-available match-all
+  10 class always do-until-failure
+   10 authenticate using dot1x
+  20 class in_critical_auth do-until-failure
+   10 clear-session
+  30 class not_in_critical_auth do-until-failure
+   10 resume reauthentication
+ event inactivity-timeout match-all
+  10 class always do-until-failure
+   10 clear-session
+ event authentication-success match-all
+  10 class always do-until-failure
+   10 activate service-tenokate default_linksec_policy_should_secure
+ event violation match-all
+  10 class always do-until-failure
+   10 restrict 
+ event authorization-failure match-all
+  10 class not_in_critical_auth do-until-failure
+   10 authentication-restart 60
+!
+template wired_dot1x_closed
+ dot1x pae authenticator
+ dot1x timeout tx-period 7
+ storm-control broadcast level bps 200m
+ storm-control unicast level bps 62m
+ spanning-tree portfast
+ spanning-tree bpduguard enable
+ spanning-tree guard root
+ switchport mode access
+ switchport nonegotiate
+ switchport block unicast
+ device-tracking attach-policy ipdt_policy
+ mab
+ access-session host-mode single-host
+ access-session control-direction in
+ access-session port-control auto
+ authentication periodic
+ authentication timer reauthentication server
+ service-policy type control subscriber dot1x_ibns2
+ subscriber aging inactivity-timer 60 probe
+ description ""
+!
